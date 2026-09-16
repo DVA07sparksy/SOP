@@ -1,0 +1,73 @@
+services:
+  # Full mode (Postgres + Redis): docker compose --profile full up
+  postgres:
+    image: pgvector/pgvector:pg16
+    profiles: ["full"]
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: sop
+      POSTGRES_PASSWORD: sop
+      POSTGRES_DB: sop_platform
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sop"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    profiles: ["full"]
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      QUEUE_DRIVER: ${QUEUE_DRIVER:-memory}
+      RUN_INLINE_WORKERS: ${RUN_INLINE_WORKERS:-true}
+      DATABASE_URL: ${DATABASE_URL:-}
+      REDIS_URL: ${REDIS_URL:-}
+    ports:
+      - "4000:4000"
+
+  ai-worker:
+    build:
+      context: .
+      dockerfile: apps/ai-worker/Dockerfile
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      QUEUE_DRIVER: ${QUEUE_DRIVER:-memory}
+      DATABASE_URL: ${DATABASE_URL:-}
+      REDIS_URL: ${REDIS_URL:-}
+    depends_on:
+      - api
+
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+    restart: unless-stopped
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:4000
+    ports:
+      - "3000:3000"
+    depends_on:
+      - api
+
+volumes:
+  pgdata:

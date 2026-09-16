@@ -1,0 +1,13 @@
+node_modules
+dist
+.next
+.env
+.env.*
+!.env.example
+*.db
+*.db-journal
+*.sqlite
+*.log
+*.tsbuildinfo
+packages/db/prisma/migrations/**/migration.sql.bak
+.DS_Store

@@ -1,0 +1,19 @@
+{
+  "name": "@sop/shared",
+  "version": "1.0.0",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit",
+    "test": "tsx src/test/run.ts"
+  },
+  "dependencies": {
+    "@sop/db": "*"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.15",
+    "typescript": "^5.5.4",
+    "tsx": "^4.16.5"
+  }
+}

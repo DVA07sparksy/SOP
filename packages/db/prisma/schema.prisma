@@ -1,0 +1,383 @@
+// SQLite is the zero-infra local/MVP driver; the schema intentionally avoids
+// SQLite-unsupported features (enums, native arrays). Fields documented as
+// "JSON array/object" store JSON.stringify'd values and are parsed centrally
+// in @sop/shared (see parseJsonArray / parseJsonObject). Swapping the
+// datasource block to postgresql is a one-line change + migration — no
+// application code changes required.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = "file:./sop_platform.db"
+}
+
+model User {
+  id           String   @id @default(uuid())
+  email        String   @unique
+  passwordHash String?
+  // STUDENT | INSTITUTION_ADMIN | PLATFORM_ADMIN | SUPER_ADMIN | WORKER | COORDINATOR
+  role         String   @default("STUDENT")
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  student               Student?
+  institutionAdminOf    Institution[]           @relation("InstitutionAdmins")
+  coordinatorMembership CoordinatorMembership[]
+  auditActions          AuditLog[]
+  reports               Report[]
+  teamMemberships       TeamMember[]
+  teamsOwned            Team[]                  @relation("TeamOwner")
+
+  @@index([role])
+}
+
+model RefreshToken {
+  id        String   @id @default(uuid())
+  userId    String
+  tokenHash String
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+  revoked   Boolean  @default(false)
+
+  @@index([userId])
+}
+
+model Student {
+  id     String @id @default(uuid())
+  userId String @unique
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  fullName           String
+  educationLevel     String // SECONDARY | UNIVERSITY | GRADUATE | OTHER
+  fieldOfStudy       String // JSON array
+  interests          String // JSON array
+  skills             String // JSON array
+  careerInterests    String @default("[]") // JSON array
+  academicAverage    Float? // 0-20 scale (doc §12); one signal among several
+  age                Int?
+  country            String
+  region             String?
+  city               String?
+  preferredFormats   String // JSON array of ONLINE | OFFLINE | HYBRID
+  institutionRequest String? // free-text request when school not yet listed
+
+  institutionId String?
+  institution   Institution? @relation(fields: [institutionId], references: [id])
+
+  applications  Application[]
+  achievements  Achievement[]
+  questionnaire QuestionnaireResponse?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([country, region])
+}
+
+model Institution {
+  id                 String  @id @default(uuid())
+  name               String
+  type               String
+  country            String
+  region             String?
+  city               String?
+  // GOVERNMENT | PRIVATE | ASSOCIATION | OTHER
+  ownership          String  @default("GOVERNMENT")
+  verificationStatus String  @default("PENDING")
+
+  admins       User[]                  @relation("InstitutionAdmins")
+  students     Student[]
+  coordinators CoordinatorMembership[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+// Coordinators are separate person accounts (doc §7/§8): associated with 1..N
+// institutions, selecting 2-3 sectors to keep their feed focused.
+model CoordinatorMembership {
+  id            String      @id @default(uuid())
+  userId        String
+  user          User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  institutionId String
+  institution   Institution @relation(fields: [institutionId], references: [id], onDelete: Cascade)
+  sectors       String      @default("[]") // JSON array, 2-3 from the taxonomy
+  createdAt     DateTime    @default(now())
+
+  @@unique([userId, institutionId])
+}
+
+// Student questionnaire responses (doc §11). Answers stored as JSON so the
+// schema stays provider-agnostic; scoring is deterministic in @sop/shared.
+model QuestionnaireResponse {
+  id        String   @id @default(uuid())
+  studentId String   @unique
+  student   Student  @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  answers   String // JSON object: questionId -> selected option(s)
+  version   Int      @default(1)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Team {
+  id            String       @id @default(uuid())
+  name          String
+  competitionId String?
+  competition   Competition? @relation(fields: [competitionId], references: [id])
+  ownerId       String
+  owner         User         @relation("TeamOwner", fields: [ownerId], references: [id])
+  inviteCode    String       @unique
+  members       TeamMember[]
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+}
+
+model TeamMember {
+  id       String    @id @default(uuid())
+  teamId   String
+  team     Team      @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  userId   String
+  user     User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  // OWNER | MEMBER | PENDING
+  status   String    @default("PENDING")
+  joinedAt DateTime?
+
+  @@unique([teamId, userId])
+}
+
+model Source {
+  id               String        @id @default(uuid())
+  url              String        @unique
+  organization     String?
+  reliabilityScore Int           @default(50)
+  lastCheckedAt    DateTime?
+  rawPages         RawPage[]
+  competitions     Competition[]
+  createdAt        DateTime      @default(now())
+}
+
+model RawPage {
+  id          String   @id @default(uuid())
+  sourceId    String
+  source      Source   @relation(fields: [sourceId], references: [id])
+  url         String
+  contentHash String
+  rawText     String?
+  fetchedAt   DateTime @default(now())
+
+  competitions Competition[]
+
+  @@index([contentHash])
+}
+
+// The public/trusted record. Unreviewed AI output never lands here directly —
+// extraction writes DRAFT rows in non-published status and the admin decision
+// endpoint is the only path that sets status = PUBLISHED (short of the
+// explicitly-configured deterministic auto-publish gate).
+model Competition {
+  id     String @id @default(uuid())
+  status String @default("DISCOVERED")
+  // Pipeline statuses (architecture doc §19):
+  // DISCOVERED -> EXTRACTED -> DUPLICATE_REVIEW | VERIFICATION -> NEEDS_REVIEW
+  //   -> PUBLISHED | REJECTED | ARCHIVED
+
+  title       String
+  organizer   String?
+  category    String // JSON array
+  description String?
+
+  eligibilityRawText String?
+  eligibilityRules   String? // JSON object (structured rules from the eligibility agent)
+  ageMin             Int?
+  ageMax             Int?
+  educationLevels    String // JSON array
+  countries          String // JSON array
+
+  deadline            DateTime?
+  registrationOpensAt DateTime?
+  competitionDate     DateTime?
+
+  format           String  @default("ONLINE") // ONLINE | OFFLINE | HYBRID
+  location         String?
+  cost             String?
+  costAmount       Float? // numeric fee when known; pairs with costCurrency
+  costCurrency     String? // ISO 4217 (e.g. XAF)
+  benefits         String // JSON array
+  difficulty       String? // STARTER | INTERMEDIATE | ADVANCED | HIGHLY_COMPETITIVE
+  individualOrTeam String  @default("INDIVIDUAL") // INDIVIDUAL | TEAM | BOTH
+  teamSizeMax      Int?
+
+  stages               String? // JSON array [{name,date}] - qualifier/semifinal/final
+  requiredDocuments    String? // JSON array
+  preparationResources String? // JSON array [{title,url,official}]
+  editionYear          Int?
+
+  officialUrl    String?
+  applicationUrl String?
+  sourceId       String?
+  source         Source?  @relation(fields: [sourceId], references: [id])
+  rawPageId      String?
+  rawPage        RawPage? @relation(fields: [rawPageId], references: [id])
+
+  trustScore     Int       @default(0)
+  trustStatus    String    @default("PENDING")
+  lastVerifiedAt DateTime?
+  aiConfidence   Float? // extraction confidence from the AI agent (advisory, admin-visible)
+
+  duplicateOfId String?
+  duplicateOf   Competition?  @relation("Duplicates", fields: [duplicateOfId], references: [id])
+  duplicates    Competition[] @relation("Duplicates")
+
+  versions      CompetitionVersion[]
+  verifications VerificationResult[]
+  applications  Application[]
+  achievements  Achievement[]
+  reports       Report[]
+  teams         Team[]
+
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  publishedAt DateTime?
+
+  @@index([status])
+  @@index([deadline])
+}
+
+model CompetitionVersion {
+  id            String      @id @default(uuid())
+  competitionId String
+  competition   Competition @relation(fields: [competitionId], references: [id], onDelete: Cascade)
+  diff          String // JSON: { before, after, reason }
+  producedBy    String // e.g. "extraction_agent:deepseek/deepseek-v4-flash" or "admin:<userId>"
+  createdAt     DateTime    @default(now())
+
+  @@index([competitionId])
+}
+
+model VerificationResult {
+  id            String      @id @default(uuid())
+  competitionId String
+  competition   Competition @relation(fields: [competitionId], references: [id], onDelete: Cascade)
+  provider      String
+  model         String
+  agrees        Boolean
+  confidence    Float
+  notes         String?
+  createdAt     DateTime    @default(now())
+
+  @@index([competitionId])
+}
+
+// One row per AI call (Model Router): provider/model/latency/token usage —
+// the basis for cost tracking and failure dashboards (architecture doc §13).
+model AiRun {
+  id           String   @id @default(uuid())
+  task         String
+  provider     String
+  model        String
+  status       String // ok | error
+  error        String?
+  latencyMs    Int?
+  inputTokens  Int?
+  outputTokens Int?
+  createdAt    DateTime @default(now())
+
+  @@index([task, createdAt])
+  @@index([status])
+}
+
+model Application {
+  id            String      @id @default(uuid())
+  studentId     String
+  student       Student     @relation(fields: [studentId], references: [id])
+  competitionId String
+  competition   Competition @relation(fields: [competitionId], references: [id])
+  // DISCOVERED | SAVED | PREPARING | APPLIED | SELECTED | FINALIST | WINNER |
+  // NOT_SELECTED | WITHDRAWN (product doc §21)
+  status        String      @default("SAVED")
+  followed      Boolean     @default(false) // Follow = notified of new editions/changes
+  teamId        String? // set when applying as part of a team
+  notes         String?
+  submittedAt   DateTime?
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+
+  @@unique([studentId, competitionId])
+  @@index([status])
+}
+
+model Achievement {
+  id                 String       @id @default(uuid())
+  studentId          String
+  student            Student      @relation(fields: [studentId], references: [id])
+  competitionId      String?
+  competition        Competition? @relation(fields: [competitionId], references: [id])
+  // STUDENT (self-reported) | INSTITUTION (admin-recorded) | VERIFIED
+  source             String       @default("STUDENT")
+  verificationStatus String       @default("UNVERIFIED")
+  title              String
+  placement          String?
+  achievedAt         DateTime?
+  certificateUrl     String?
+  prizeDescription   String?
+  createdAt          DateTime     @default(now())
+
+  evidences AchievementEvidence[]
+}
+
+// Evidence files for achievements (doc §24) — metadata only; bytes live in
+// object storage outside the relational DB.
+model AchievementEvidence {
+  id            String      @id @default(uuid())
+  achievementId String
+  achievement   Achievement @relation(fields: [achievementId], references: [id], onDelete: Cascade)
+  fileName      String
+  mimeType      String
+  byteSize      Int
+  storageKey    String
+  uploadedById  String?
+  createdAt     DateTime    @default(now())
+}
+
+model Report {
+  id            String      @id @default(uuid())
+  competitionId String
+  competition   Competition @relation(fields: [competitionId], references: [id])
+  reportedById  String?
+  reportedBy    User?       @relation(fields: [reportedById], references: [id], onDelete: SetNull)
+  reason        String
+  message       String?
+  resolved      Boolean     @default(false)
+  createdAt     DateTime    @default(now())
+
+  @@index([competitionId])
+}
+
+model AuditLog {
+  id         String   @id @default(uuid())
+  actorId    String?
+  actor      User?    @relation(fields: [actorId], references: [id])
+  actorType  String // human | ai_agent | system
+  action     String
+  targetType String
+  targetId   String
+  metadata   String? // JSON object
+  createdAt  DateTime @default(now())
+
+  @@index([targetType, targetId])
+}
+
+// Append-only product analytics (architecture doc §31).
+model Event {
+  id        String   @id @default(uuid())
+  userId    String?
+  sessionId String?
+  type      String
+  metadata  String? // JSON object
+  createdAt DateTime @default(now())
+
+  @@index([type, createdAt])
+}
